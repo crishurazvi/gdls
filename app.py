@@ -2,112 +2,119 @@ import streamlit as st
 import re
 
 def parse_bibliography(bib_text):
-    """Transformă lista lungă de bibliografie într-un dicționar { '1': 'Text referință...' }"""
+    """Transformă lista de bibliografie într-un dicționar { '1': 'Text...' }"""
     bib_dict = {}
-    # Caută linii care încep cu un număr urmat de tab sau spațiu
+    # Curățăm textul și căutăm linii care încep cu un număr
     lines = bib_text.split('\n')
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        # Match pentru formatul: "1\tAdler Y..." sau "1 Adler Y..."
+        # Match pentru: "1 Adler Y..." sau "1\tAdler Y..."
         match = re.match(r'^(\d+)\s+(.*)', line)
         if match:
             num, content = match.groups()
             bib_dict[num] = content
     return bib_dict
 
-def extract_referenced_numbers(section_text):
-    """Identifică toate numerele de referință dintr-un text (ex: [1], [2, 3], [10-12])"""
-    # Găsește numere în paranteze pătrate [12] sau [1, 2, 45] sau [12-15]
+def extract_referenced_numbers(section_text, bib_keys):
+    """
+    Identifică numerele de referință prin 3 metode:
+    1. Paranteze [1] sau (1)
+    2. Numere lipite de cuvinte (ex: myocarditis27)
+    3. Numere de sine stătătoare care există în bibliografie
+    """
     found_numbers = set()
     
-    # Pattern pentru numere în paranteze [ ]
-    bracket_matches = re.findall(r'\[([\d\s,\-]+)\]', section_text)
+    # Metoda 1: Paranteze pătrate sau rotunde [1, 2-5] sau (1, 2)
+    bracket_matches = re.findall(r'[\(\[]([\d\s,\-]+)[\)\]]', section_text)
     for match in bracket_matches:
-        # Split după virgulă sau liniuță
-        parts = re.split(r'[,\-]', match)
-        for part in parts:
-            part = part.strip()
-            if part.isdigit():
-                found_numbers.add(part)
-                
-    # Opțional: Căutăm și numere simple care ar putea fi referințe (dacă nu sunt în paranteze)
-    # Dar limităm căutarea la numerele care apar des ca referințe pentru a evita confuzia cu datele clinice
-    # De obicei ESC folosește paranteze pătrate.
-    
+        # Gestionăm intervale de tip 10-12
+        if '-' in match:
+            parts = re.findall(r'\d+', match)
+            if len(parts) >= 2:
+                try:
+                    start, end = int(parts[0]), int(parts[-1])
+                    for n in range(start, end + 1):
+                        if str(n) in bib_keys: found_numbers.add(str(n))
+                except: pass
+        # Gestionăm liste de tip 1, 2, 3
+        nums = re.findall(r'\d+', match)
+        for n in nums:
+            if n in bib_keys: found_numbers.add(n)
+
+    # Metoda 2: Numere lipite de litere (frecvent la copy-paste din PDF, ex: "disease27")
+    attached_matches = re.findall(r'[a-zA-Z](\d+)', section_text)
+    for n in attached_matches:
+        if n in bib_keys:
+            found_numbers.add(n)
+
+    # Metoda 3: Orice număr de sine stătător care se potrivește cu o cheie din bib
+    # (Excludem anii probabili 2020-2025 pentru a evita alarmele false, dacă nu sunt referințe)
+    standalone_nums = re.findall(r'\b\d{1,3}\b', section_text)
+    for n in standalone_nums:
+        if n in bib_keys:
+            found_numbers.add(n)
+            
     return found_numbers
 
 def split_sections(text):
-    """Împarte ghidul pe secțiuni bazat pe numerotare (ex: 1. , 1.1. , etc)"""
+    # Split pe titluri de tip 1. , 1.1 , 2.1.1
     pattern = r'\n(?=\d+\.\s|\d+\.\d+\s|\d+\.\d+\.\d+\s)'
     sections = re.split(pattern, text)
     return [s.strip() for s in sections if s.strip()]
 
 def main():
-    st.set_page_config(page_title="ESC 2025 Obsidian Pro", layout="wide")
+    st.set_page_config(page_title="ESC 2025 Fixer", layout="wide")
+    st.title("🫀 ESC 2025: Referințe Fix")
     
-    st.title("🫀 ESC 2025 Smart Splitter & Bib-Filter")
-    st.markdown("Împarte ghidul în paragrafe și extrage automat **doar bibliografia relevantă** pentru fiecare secțiune.")
-
     col1, col2 = st.columns(2)
     with col1:
-        guide_text = st.text_area("1. Textul Ghidului ESC:", height=300)
+        guide_text = st.text_area("1. Textul Ghidului:", height=300)
     with col2:
-        biblio_input = st.text_area("2. Lista completă de Referințe (toate cele 676):", height=300)
+        biblio_input = st.text_area("2. Bibliografia (Toată lista):", height=300)
 
-    if st.button("Generează Prompt-uri"):
+    if st.button("Procesează"):
         if not guide_text or not biblio_input:
-            st.error("Te rog completează ambele câmpuri.")
+            st.warning("Te rog introdu datele.")
             return
 
-        # Pas 1: Procesăm bibliografia totală
-        full_bib_dict = parse_bibliography(biblio_input)
-        
-        # Pas 2: Împărțim ghidul pe secțiuni
+        bib_dict = parse_bibliography(biblio_input)
         sections = split_sections(guide_text)
         
-        st.success(f"Ghid împărțit în {len(sections)} secțiuni. Bibliografie procesată: {len(full_bib_dict)} intrări.")
+        st.info(f"Am găsit {len(sections)} secțiuni și {len(bib_dict)} referințe în bibliografie.")
 
         for i, section in enumerate(sections):
-            # Pas 3: Identificăm ce numere de referință sunt în această secțiune
-            ref_numbers = extract_referenced_numbers(section)
+            # Extracție numere folosind cheile de bibliografie existente
+            ref_numbers = extract_referenced_numbers(section, bib_dict.keys())
             
-            # Pas 4: Filtrăm bibliografia doar pentru aceste numere
-            relevant_bib = []
-            # Sortăm numerele pentru ordine în afișare
-            for num in sorted(list(ref_numbers), key=int):
-                if num in full_bib_dict:
-                    relevant_bib.append(f"{num} {full_bib_dict[num]}")
+            # Construim lista de referințe pentru acest paragraf
+            current_bib_list = []
+            for n in sorted(list(ref_numbers), key=int):
+                current_bib_list.append(f"[{n}] {bib_dict[n]}")
             
-            bib_text_for_prompt = "\n".join(relevant_bib) if relevant_bib else "Nu s-au identificat referințe specifice în acest paragraf."
+            bib_output = "\n".join(current_bib_list) if current_bib_list else "Nu s-au găsit referințe în acest text."
 
-            # Prima linie a secțiunii pentru titlu
-            first_line = section.split('\n')[0][:80]
-
-            with st.expander(f"Secțiunea {i+1}: {first_line}"):
-                final_prompt = f"""Acționează ca un expert cardiolog și utilizator avansat de Obsidian. Analizează textul următor din Ghidul ESC 2025 (IMPS) și creează o pagină Obsidian formatată astfel:
+            with st.expander(f"Paragraful {i+1}: {section[:100]}..."):
+                prompt = f"""Acționează ca un expert cardiolog și utilizator avansat de Obsidian. Analizează textul următor din Ghidul ESC 2025 (IMPS) și creează o pagină Obsidian formatată astfel:
 YAML Header: Include id (format ESC-IMPS-X.X-Nume), type: guideline-section, guideline: ESC IMPS 2025, domain, section, tags, și linked_paragraphs.
 Structură:
 Folosește un callout > [!abstract] Overview pentru un rezumat scurt.
 Tradu in romana textul cu si insereaza referintele (care sa fie mentionate la finalul paginii)
 Folosește subtitluri clare (H2, H3).
 Foloseste stilizare si emoji pentru a scoate in evidenta lucrurile importante
-Linking Logic: Oriunde apare o referință numerică în text (ex: [27]), înlocuiește-o cu un link de tipul [[ESC-IMPS-AUTHOR-YEAR]]. Identifică autorul și anul din bibliografia pe care o voi furniza sau din context.
+Linking Logic: Oriunde apare o referință numerică în text (ex: [27]), înlocuiește-o cu un link de tipul [[ESC-IMPS-AUTHOR-YEAR]]. Identifică autorul și anul din bibliografia furnizată.
 Limba: Traduce explicațiile în limba română, păstrând termenii medicali consacrați.
 
-Iată textul secțiunii:
-[START TEXT SECȚIUNE]
+---
+TEXTUL SECȚIUNII:
 {section}
-[END TEXT SECȚIUNE]
 
-Iată lista de referințe RELEVANTE pentru această secțiune pentru a genera linkurile corect:
-[START BIBLIOGRAFIE]
-{bib_text_for_prompt}
-[END BIBLIOGRAFIE]"""
-
-                st.code(final_prompt, language="markdown")
-                st.button(f"Copiază Prompt {i+1}", key=f"copy_{i}")
+---
+LISTA DE REFERINȚE RELEVANTE:
+{bib_output}
+"""
+                st.code(prompt, language="markdown")
 
 if __name__ == "__main__":
     main()
